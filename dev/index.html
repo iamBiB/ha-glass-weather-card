@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glass Weather Card · dev</title>
+<style>
+  :root { color-scheme: dark; --ha-card-border-radius: 12px; }
+  body { margin: 0; font-family: Roboto, system-ui, sans-serif; background: #111318; color: #e6e8ee; }
+  header { position: sticky; top: 0; z-index: 5; background: #1a1d24; border-bottom: 1px solid #2a2e38; padding: 12px 16px; display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; font-size: 13px; }
+  label { display: inline-flex; align-items: center; gap: 6px; }
+  select, input, button { font: inherit; }
+  button { background: #2a2e38; color: inherit; border: 1px solid #3a3f4c; border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+  main { display: flex; flex-wrap: wrap; gap: 24px; padding: 24px 16px; align-items: flex-start; }
+  .slot { width: var(--w, 340px); }
+  .slot.sections { height: var(--h, 504px); }
+  .slot h2 { font-size: 12px; font-weight: 500; color: #8a90a0; margin: 0 0 8px; }
+  #status { color: #8a90a0; }
+</style>
+</head>
+<body>
+<header>
+  <label>Condition <select id="cond"></select></label>
+  <button id="cycle" type="button">Cycle all</button>
+  <label><input type="checkbox" id="sun"> Sun below horizon</label>
+  <label><input type="checkbox" id="missing"> Missing attributes</label>
+  <label><input type="checkbox" id="nofc"> Forecast fails</label>
+  <label>Width <input type="range" id="width" min="250" max="1200" value="340"> <span id="wval">340</span>px</label>
+  <label>Layout <select id="layout"><option value="masonry">masonry</option><option value="sections">sections (8 rows)</option></select></label>
+  <label>Days <input type="number" id="days" min="0" max="7" value="5" style="width:3.5em"></label>
+  <label>Lang <select id="lang"><option>en</option><option>de</option><option>ro</option><option>en-US</option></select></label>
+  <label>Clock <select id="tf"><option value="language">language</option><option value="12">12 h</option><option value="24">24 h</option></select></label>
+  <label><input type="checkbox" id="anim" checked> Animations</label>
+  <label><input type="checkbox" id="sound"> Sound</label>
+  <label><input type="checkbox" id="radius"> 30 px radius</label>
+  <label><input type="checkbox" id="second"> Second card</label>
+  <button id="detach" type="button">Detach / reattach</button>
+  <span id="status"></span>
+</header>
+<main>
+  <div class="slot" id="slot1"><h2>weather.home</h2></div>
+  <div class="slot" id="slot2" hidden><h2>weather.other (independent)</h2></div>
+</main>
+
+<script type="module">
+  // HA provides <ha-card>; a plain block element is enough here.
+  customElements.define('ha-card', class extends HTMLElement {});
+
+  import('../dist/glass-weather-card.js').then(() => init());
+  import { CONDITIONS, connection, createMockHass } from './mock-hass.js';
+
+  const $ = (s) => document.querySelector(s);
+  function init() {
+    const sel = $('#cond');
+    sel.innerHTML = CONDITIONS.map((c) => `<option ${c === 'rainy' ? 'selected' : ''}>${c}</option>`).join('');
+
+    const make = (entity) => document.createElement('glass-weather-card');
+    const cards = [make(), make()];
+    const slots = [$('#slot1'), $('#slot2')];
+    slots[0].append(cards[0]);
+    slots[1].append(cards[1]);
+
+    const config = (entity) => ({
+      entity,
+      days: Number($('#days').value),
+      animations: $('#anim').checked,
+      sound: $('#sound').checked,
+      ...($('#radius').checked ? { border_radius: 30 } : {}),
+    });
+    const applyConfig = () => {
+      cards[0].setConfig(config('weather.home'));
+      cards[1].setConfig(config('weather.other'));
+    };
+    const applyHass = () => {
+      const hass = createMockHass({
+        condition: sel.value,
+        sunDown: $('#sun').checked,
+        missingAttrs: $('#missing').checked,
+        noForecast: $('#nofc').checked,
+        language: $('#lang').value,
+        timeFormat: $('#tf').value,
+      });
+      cards.forEach((c) => (c.hass = hass));
+    };
+    const applyLayout = () => {
+      const w = $('#width').value;
+      $('#wval').textContent = w;
+      slots.forEach((s) => {
+        s.style.setProperty('--w', `${w}px`);
+        s.classList.toggle('sections', $('#layout').value === 'sections');
+      });
+    };
+
+    applyConfig();
+    applyHass();
+    applyLayout();
+
+    ['#cond', '#sun', '#missing', '#lang', '#tf'].forEach((id) => $(id).addEventListener('change', applyHass));
+    $('#nofc').addEventListener('change', () => {
+      // a new subscription is only made when entity/type changes: force one by re-attaching
+      applyHass();
+      cards.forEach((c) => { const p = c.parentNode; c.remove(); p.append(c); });
+    });
+    ['#days', '#anim', '#sound', '#radius'].forEach((id) => $(id).addEventListener('change', applyConfig));
+    ['#width', '#layout'].forEach((id) => $(id).addEventListener('input', applyLayout));
+    $('#second').addEventListener('change', (e) => (slots[1].hidden = !e.target.checked));
+
+    let timer = 0;
+    $('#cycle').addEventListener('click', (e) => {
+      if (timer) { clearInterval(timer); timer = 0; e.target.textContent = 'Cycle all'; return; }
+      e.target.textContent = 'Stop';
+      timer = setInterval(() => {
+        sel.selectedIndex = (sel.selectedIndex + 1) % sel.options.length;
+        applyHass();
+      }, 2800);
+    });
+
+    let parked = null;
+    $('#detach').addEventListener('click', () => {
+      if (parked) { slots[0].append(parked); parked = null; }
+      else { parked = cards[0]; parked.remove(); }
+    });
+
+    // live subscription counter: should drop when a card is detached
+    setInterval(() => ($('#status').textContent = `forecast subscriptions: ${connection.active}`), 500);
+
+    cards[0].addEventListener('hass-action', (e) => console.log('hass-action', e.detail));
+  }
+</script>
+</body>
+</html>
